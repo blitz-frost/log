@@ -7,7 +7,7 @@
 //
 // Use the Node type to create log pipelines that can still be invoked through a single method call.
 //
-// Consider adding an unnamed Node pointer member to your central struct types. Don't forget to initialize it with NewNode.
+// Consider adding an unnamed Node pointer member to your central struct types. Don't forget to initialize it with MakeNode.
 //
 //	type someType struct {
 //		...
@@ -32,7 +32,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"sync"
 )
 
 // predefined log levels
@@ -48,7 +47,17 @@ const (
 	Emergency        // one or more systems are down
 )
 
-var DefaultLogger Logger = &LineLogger{Dst: os.Stdout}
+var DefaultLogger Logger = MakeLineLogger(os.Stdout)
+
+// Loggers should generally have some degree of asynchronous operation, so they should also provide dedicated Close methods to ensure all work is finished before exiting.
+type Closer = io.Closer
+
+// Data can be used to transfer Log calls between goroutines. Exported for potential use by Logger implementations.
+type Data struct {
+	Level   int
+	Message string
+	Entries []Entries
+}
 
 type Entries []Entry
 
@@ -56,6 +65,8 @@ func (x Entries) Entries() Entries {
 	return x
 }
 
+// An EntriesGiver hands over Key-Value pairs in significant order for logging.
+// In order to avoid race conditions with asynchronous logging processes, implementations should ensure that returned Entry.Values are immutable or at least stable.
 type EntriesGiver interface {
 	Entries() Entries
 }
@@ -91,7 +102,8 @@ type Formatter interface {
 //
 // This interface is meant to be concise and generalistic. A fair degree of optimization is achievable through the use of prefered EntriesGiver implementations.
 //
-// Since data is not guaranteed to be immutable, implementations should treat collection and formatting synchronously, while the backend communication can/should be performed asynchronously.
+// Implementations should treat Entry collection synchronously, while formatting and backend transmission can/should be performed asynchronously.
+// Conversely, EntriesGivers should return values that are immutable or stable.
 type Logger interface {
 	Log(int, string, ...EntriesGiver) // should not modify mutable return values, such as Entry slices or mutable Entry values
 }
@@ -103,7 +115,7 @@ type Node struct {
 	src []EntriesGiver
 }
 
-// NewNode creates a new usable Node using dst as the actual Logger implementation.
+// MakeNode creates a new usable Node using dst as the actual Logger implementation.
 //
 // static should return a set of immutable Entries, or at least guaranteed to not change throughout the lifespan of the Node.
 // If dst is a Formatter, static will be passed through it on creation.
@@ -111,8 +123,8 @@ type Node struct {
 //
 // src is an optional list of EntriesGivers that will be drawn from for each log.
 //
-// New logs will contain: (possible preformated) static + src element Entries + individual log data.
-func NewNode(dst Logger, static EntriesGiver, src ...EntriesGiver) *Node {
+// New logs will contain: (possible preformated) static + src element Entries + particular log data.
+func MakeNode(dst Logger, static EntriesGiver, src ...EntriesGiver) Node {
 	var givers []EntriesGiver
 
 	if static != nil {
@@ -124,22 +136,22 @@ func NewNode(dst Logger, static EntriesGiver, src ...EntriesGiver) *Node {
 
 	givers = append(givers, src...)
 
-	return &Node{
+	return Node{
 		dst: dst,
 		src: givers,
 	}
 }
 
-func (x *Node) Err(lvl int, msg string, err error, e ...EntriesGiver) {
+func (x Node) Err(lvl int, msg string, err error, e ...EntriesGiver) {
 	LogError(x, lvl, msg, err, e...)
 }
 
-func (x *Node) Log(lvl int, msg string, e ...EntriesGiver) {
-	x.src = append(x.src, e...)
+func (x Node) Log(lvl int, msg string, e ...EntriesGiver) {
+	givers := make([]EntriesGiver, len(x.src)+len(e))
+	copy(givers, x.src)
+	copy(givers[len(x.src):], e)
 
-	x.dst.Log(lvl, msg, x.src...)
-
-	x.src = x.src[:len(x.src)-len(e)]
+	x.dst.Log(lvl, msg, givers...)
 }
 
 // A LineLogger writes logs to an io.Writer using the following format:
@@ -153,45 +165,100 @@ func (x *Node) Log(lvl int, msg string, e ...EntriesGiver) {
 //
 // Its purpose is to provide human readable logs to stdout or local files.
 //
-// A LineLogger is concurrent safe, but is not designed for high volumes.
+// A LineLogger is concurrent safe, and should be capable of handling pretty high volumes.
+//
+// Values must be created using MakeLineLogger and Closed when no longer needed.
 type LineLogger struct {
-	Dst io.Writer // log destination; write errors will panic
+	dst io.Writer // log destination; write errors will panic
 
-	buf lineBuf
+	dataChan  chan Data        // transfer Data from callers to dedicated goroutine
+	writeChan chan chan []byte // queue raw formatted data to dedicated write goroutine
 
-	mux sync.Mutex
+	done chan struct{} // closed when the write loop exits
 }
 
-func (x *LineLogger) Format(e EntriesGiver) EntriesGiver {
-	return newLineEntries(e)
-}
-
-func (x *LineLogger) Log(lvl int, msg string, e ...EntriesGiver) {
-	x.mux.Lock()
-
-	x.buf.data = append(x.buf.data, LevelString(lvl)...)
-	x.buf.data = append(x.buf.data, "  "...)
-	x.buf.data = append(x.buf.data, msg...)
-	x.buf.data = append(x.buf.data, '\n')
-
-	for _, elem := range e {
-		entries := elem.Entries()
-		for _, entry := range entries {
-			x.buf.print(entry)
-		}
+func MakeLineLogger(dst io.Writer) LineLogger {
+	x := LineLogger{
+		dst:       dst,
+		dataChan:  make(chan Data, 8),
+		writeChan: make(chan chan []byte, 8),
+		done:      make(chan struct{}),
 	}
-	x.buf.data = append(x.buf.data, '\n')
 
-	// formatting is done, no need to hold up the caller anymore
-	go func(x *LineLogger) {
-		if _, err := x.Dst.Write(x.buf.data); err != nil {
-			x.mux.Unlock()
+	go x.run()
+	go x.write()
+
+	return x
+}
+
+// Close waits for all scheduled logs to be written, then closes the underlying Writer if it is also a Closer.
+// As soon as Close is called, any further Log calls will panic.
+func (x LineLogger) Close() error {
+	close(x.dataChan)
+	<-x.done
+
+	var err error
+	if c, ok := x.dst.(Closer); ok {
+		err = c.Close()
+	}
+
+	return err
+}
+
+func (x LineLogger) Format(e EntriesGiver) EntriesGiver {
+	return makeLineEntries(e)
+}
+
+func (x LineLogger) Log(lvl int, msg string, e ...EntriesGiver) {
+	// gather entries synchronously
+	s := make([]Entries, len(e))
+	for i := range e {
+		s[i] = e[i].Entries()
+	}
+
+	x.dataChan <- Data{
+		Level:   lvl,
+		Message: msg,
+		Entries: s,
+	}
+}
+
+// asynchronous part
+func (x LineLogger) log(data Data, ch chan []byte) {
+	buf := newLineBuffer()
+
+	buf.data = append(buf.data, LevelString(data.Level)...)
+	buf.data = append(buf.data, "  "...)
+	buf.data = append(buf.data, data.Message...)
+	buf.data = append(buf.data, '\n')
+
+	for _, elem := range data.Entries {
+		buf.append(elem)
+	}
+	buf.data = append(buf.data, '\n')
+
+	ch <- buf.data // pass over to writing
+}
+
+// run pulls data from Log calls to process it asynchronously and unblock callers ASAP
+func (x LineLogger) run() {
+	for data := range x.dataChan {
+		ch := make(chan []byte) // transfer formatted log to the write goroutine
+		go x.log(data, ch)      // perform formatting asynchronously in order to pull data from callers ASAP
+		x.writeChan <- ch       // inform write goroutine of the next log in line
+	}
+	close(x.writeChan)
+}
+
+// write loop that ensures logs are written in the order they arrive
+// also protects the underlying writer from concurrent calls
+func (x LineLogger) write() {
+	for ch := range x.writeChan {
+		if _, err := x.dst.Write(<-ch); err != nil {
 			panic(err)
 		}
-		x.buf.reset()
-
-		x.mux.Unlock()
-	}(x)
+	}
+	close(x.done)
 }
 
 // errorBlock is an error type that may contain optional entries for logging.
@@ -199,8 +266,8 @@ func (x *LineLogger) Log(lvl int, msg string, e ...EntriesGiver) {
 // It may wrap another error, which will be appended as a final {"err", [error]} element.
 type errorBlock []Entry
 
-func (x errorBlock) Entries() []Entry {
-	return x
+func (x errorBlock) Entries() Entries {
+	return Entries(x)
 }
 
 func (x errorBlock) Error() string {
@@ -215,48 +282,50 @@ func (x errorBlock) Unwrap() error {
 	return nil
 }
 
-// lineBuf is the prefered formated block used by LineLogger.
-type lineBuf struct {
-	data []byte // preformated lines
+// lineBuffer is the prefered formated block used by LineLogger.
+type lineBuffer struct {
+	data []byte // preftormated lines
 	ends []int  // line end indices; needed when working with preformated subblocks to insert additional spacing
 
 	space []byte // used to insert line spacing
 }
 
-func (x *lineBuf) endLine() {
-	x.data = append(x.data, '\n')
-	x.ends = append(x.ends, len(x.data))
+// newLineBuffer allocates a lineBuffer with sufficient space for most uses
+func newLineBuffer() *lineBuffer {
+	return &lineBuffer{
+		data:  make([]byte, 0, 1024),
+		ends:  make([]int, 0, 16),
+		space: []byte("        ")[:0],
+	}
 }
 
-func (x *lineBuf) print(e Entry) {
+func (x *lineBuffer) append(e EntriesGiver) {
+	if pre, ok := e.(lineEntries); ok {
+		// copy preformatted string, inserting appropriate spacing
+		start := 0
+		for _, end := range pre.buf.ends {
+			x.data = append(x.data, x.space...)
+			x.data = append(x.data, pre.buf.data[start:end]...)
+			x.ends = append(x.ends, len(x.data))
+			start = end
+		}
+		return
+	}
+
+	for _, entry := range e.Entries() {
+		x.appendEntry(entry)
+	}
+}
+
+func (x *lineBuffer) appendEntry(e Entry) {
 	x.data = append(x.data, x.space...)
 	x.data = append(x.data, e.Key...)
 
 	switch sub := e.Value.(type) {
-	case *lineEntries:
-		x.endLine()
-		x.space = append(x.space, "  "...)
-
-		// copy preformated string, inserting appropriate spacing
-		start := 0
-		for _, end := range sub.buf.ends {
-			x.data = append(x.data, x.space...)
-			x.data = append(x.data, sub.buf.data[start:end]...)
-			x.ends = append(x.ends, len(x.data))
-			start = end
-		}
-
-		x.space = x.space[:len(x.space)-2]
-
 	case EntriesGiver:
 		x.endLine()
 		x.space = append(x.space, "  "...)
-
-		// print each subblock entry recursively
-		for _, entry := range sub.Entries() {
-			x.print(entry)
-		}
-
+		x.append(sub)
 		x.space = x.space[:len(x.space)-2]
 
 	default:
@@ -267,8 +336,13 @@ func (x *lineBuf) print(e Entry) {
 	}
 }
 
+func (x *lineBuffer) endLine() {
+	x.data = append(x.data, '\n')
+	x.ends = append(x.ends, len(x.data))
+}
+
 // reset clears all data while retaining allocated memory, making reuse more efficient than creating a new value
-func (x *lineBuf) reset() {
+func (x *lineBuffer) reset() {
 	x.data = x.data[:0]
 	x.ends = x.ends[:0]
 	x.space = x.space[:0]
@@ -278,18 +352,18 @@ func (x *lineBuf) reset() {
 type lineEntries struct {
 	src []Entry
 
-	buf lineBuf
+	buf lineBuffer
 }
 
-func newLineEntries(src EntriesGiver) lineEntries {
+func makeLineEntries(src EntriesGiver) lineEntries {
 	if same, ok := src.(lineEntries); ok {
 		return same
 	}
 
-	buf := lineBuf{}
+	buf := lineBuffer{}
 	entries := src.Entries()
 	for _, entry := range entries {
-		buf.print(entry)
+		buf.appendEntry(entry)
 	}
 
 	return lineEntries{
@@ -302,9 +376,27 @@ func (x lineEntries) Entries() Entries {
 	return x.src
 }
 
+// Close closes the DefaultLogger if it is a Closer.
+func Close() error {
+	var err error
+	if c, ok := DefaultLogger.(Closer); ok {
+		err = c.Close()
+	}
+	return err
+}
+
 // Err logs an error value using the DefaultLogger.
 func Err(lvl int, msg string, err error, e ...EntriesGiver) {
 	LogError(DefaultLogger, lvl, msg, err, e...)
+}
+
+// Format preformats the input if the DefaultLogger is a Formatter.
+// Otherwise returns the input unchanged.
+func Format(e EntriesGiver) EntriesGiver {
+	if f, ok := DefaultLogger.(Formatter); ok {
+		return f.Format(e)
+	}
+	return e
 }
 
 // Predefined level string forms (the constant identifier in all uppercase)
