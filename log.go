@@ -32,6 +32,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+
+	"github.com/blitz-frost/log/logger"
 )
 
 // predefined log levels
@@ -47,38 +49,17 @@ const (
 	Emergency        // one or more systems are down
 )
 
-var DefaultLogger Logger = MakeLineLogger(os.Stdout)
+// The Logger used by the default package functions (Log, Err, Close).
+// Can be replaced, in which case the old one should be closed first.
+//
+// Initialized to a LineLogger to stdout, which will not be closed when the Logger is closed.
+var DefaultLogger Logger = LineLoggerMake(os.Stdout, func() {})
 
-// Loggers should generally have some degree of asynchronous operation, so they should also provide dedicated Close methods to ensure all work is finished before exiting.
-type Closer = io.Closer
+type Entry = logger.Entry
 
-// Data can be used to transfer Log calls between goroutines. Exported for potential use by Logger implementations.
-type Data struct {
-	Level   int
-	Message string
-	Entries []Entries
-}
+type Entries = logger.Entries
 
-type Entries []Entry
-
-func (x Entries) Entries() Entries {
-	return x
-}
-
-// An EntriesGiver hands over Key-Value pairs in significant order for logging.
-// In order to avoid race conditions with asynchronous logging processes, implementations should ensure that returned Entry.Values are immutable or at least stable.
-type EntriesGiver interface {
-	Entries() Entries
-}
-
-type Entry struct {
-	Key   string
-	Value any
-}
-
-func (x Entry) Entries() Entries {
-	return Entries{x}
-}
+type EntriesGiver = logger.EntriesGiver
 
 // ErrorLogger is a Logger extension that adds error logging convenience.
 type ErrorLogger struct {
@@ -89,9 +70,9 @@ func (x ErrorLogger) Err(lvl int, msg string, err error, e ...EntriesGiver) {
 	LogError(x, lvl, msg, err, e...)
 }
 
-// A Formatter preprocesses EntriesGivers to a type optimized for a particular Logger.
-type Formatter interface {
-	Format(EntriesGiver) EntriesGiver
+// A Preformatter preprocesses EntriesGivers to a type optimized for a particular Logger.
+type Preformatter interface {
+	Preformat(EntriesGiver) EntriesGiver
 }
 
 // A Logger handles data formatting and transfer to a log destination (stdout, file, remote service, etc.).
@@ -128,8 +109,8 @@ func MakeNode(dst Logger, static EntriesGiver, src ...EntriesGiver) Node {
 	var givers []EntriesGiver
 
 	if static != nil {
-		if f, ok := dst.(Formatter); ok {
-			static = f.Format(static)
+		if p, ok := dst.(Preformatter); ok {
+			static = p.Preformat(static)
 		}
 		givers = append(givers, static)
 	}
@@ -164,101 +145,21 @@ func (x Node) Log(lvl int, msg string, e ...EntriesGiver) {
 //	  subkey1 - subvalue1
 //
 // Its purpose is to provide human readable logs to stdout or local files.
-//
-// A LineLogger is concurrent safe, and should be capable of handling pretty high volumes.
-//
-// Values must be created using MakeLineLogger and Closed when no longer needed.
 type LineLogger struct {
-	dst io.Writer // log destination; write errors will panic
-
-	dataChan  chan Data        // transfer Data from callers to dedicated goroutine
-	writeChan chan chan []byte // queue raw formatted data to dedicated write goroutine
-
-	done chan struct{} // closed when the write loop exits
+	logger.T[[]byte]
 }
 
-func MakeLineLogger(dst io.Writer) LineLogger {
-	x := LineLogger{
-		dst:       dst,
-		dataChan:  make(chan Data, 8),
-		writeChan: make(chan chan []byte, 8),
-		done:      make(chan struct{}),
-	}
-
-	go x.run()
-	go x.write()
-
-	return x
+// LineLoggerMake returns a usable LineLogger.
+// onClose may be nil, in which case it will default to closing the Writer, if it is also a io.Closer.
+func LineLoggerMake(dst io.Writer, onClose func()) LineLogger {
+	return LineLogger{logger.Make[[]byte](lineCore{
+		w:       dst,
+		onClose: onClose,
+	})}
 }
 
-// Close waits for all scheduled logs to be written, then closes the underlying Writer if it is also a Closer.
-// As soon as Close is called, any further Log calls will panic.
-func (x LineLogger) Close() error {
-	close(x.dataChan)
-	<-x.done
-
-	var err error
-	if c, ok := x.dst.(Closer); ok {
-		err = c.Close()
-	}
-
-	return err
-}
-
-func (x LineLogger) Format(e EntriesGiver) EntriesGiver {
-	return makeLineEntries(e)
-}
-
-func (x LineLogger) Log(lvl int, msg string, e ...EntriesGiver) {
-	// gather entries synchronously
-	s := make([]Entries, len(e))
-	for i := range e {
-		s[i] = e[i].Entries()
-	}
-
-	x.dataChan <- Data{
-		Level:   lvl,
-		Message: msg,
-		Entries: s,
-	}
-}
-
-// asynchronous part
-func (x LineLogger) log(data Data, ch chan []byte) {
-	buf := newLineBuffer()
-
-	buf.data = append(buf.data, LevelString(data.Level)...)
-	buf.data = append(buf.data, "  "...)
-	buf.data = append(buf.data, data.Message...)
-	buf.data = append(buf.data, '\n')
-
-	for _, elem := range data.Entries {
-		buf.append(elem)
-	}
-	buf.data = append(buf.data, '\n')
-
-	ch <- buf.data // pass over to writing
-}
-
-// run pulls data from Log calls to process it asynchronously and unblock callers ASAP
-func (x LineLogger) run() {
-	for data := range x.dataChan {
-		ch := make(chan []byte) // transfer formatted log to the write goroutine
-		go x.log(data, ch)      // perform formatting asynchronously in order to pull data from callers ASAP
-		x.writeChan <- ch       // inform write goroutine of the next log in line
-	}
-	close(x.writeChan)
-}
-
-// write loop that ensures logs are written in the order they arrive
-// also protects the underlying writer from concurrent calls
-func (x LineLogger) write() {
-	for ch := range x.writeChan {
-		if _, err := x.dst.Write(<-ch); err != nil {
-			panic(err)
-		}
-	}
-	close(x.done)
+func (x LineLogger) Preformat(e EntriesGiver) EntriesGiver {
+	return lineEntriesMake(e)
 }
 
 // errorBlock is an error type that may contain optional entries for logging.
@@ -348,6 +249,46 @@ func (x *lineBuffer) reset() {
 	x.space = x.space[:0]
 }
 
+type lineCore struct {
+	w       io.Writer
+	onClose func()
+}
+
+func (x lineCore) Close() {
+	if x.onClose != nil {
+		x.onClose()
+		return
+	}
+
+	if c, ok := x.w.(io.Closer); ok {
+		if err := c.Close(); err != nil {
+			panic(err)
+		}
+	}
+}
+
+func (x lineCore) Format(data logger.Data) []byte {
+	buf := newLineBuffer()
+
+	buf.data = append(buf.data, LevelString(data.Level)...)
+	buf.data = append(buf.data, "  "...)
+	buf.data = append(buf.data, data.Message...)
+	buf.data = append(buf.data, '\n')
+
+	for _, elem := range data.Entries {
+		buf.append(elem)
+	}
+	buf.data = append(buf.data, '\n')
+
+	return buf.data
+}
+
+func (x lineCore) Write(b []byte) {
+	if _, err := x.w.Write(b); err != nil {
+		panic(err)
+	}
+}
+
 // lineEntries is the optimized preformated Entries for LinePrinter.
 type lineEntries struct {
 	src []Entry
@@ -355,7 +296,7 @@ type lineEntries struct {
 	buf lineBuffer
 }
 
-func makeLineEntries(src EntriesGiver) lineEntries {
+func lineEntriesMake(src EntriesGiver) lineEntries {
 	if same, ok := src.(lineEntries); ok {
 		return same
 	}
@@ -377,26 +318,15 @@ func (x lineEntries) Entries() Entries {
 }
 
 // Close closes the DefaultLogger if it is a Closer.
-func Close() error {
-	var err error
-	if c, ok := DefaultLogger.(Closer); ok {
-		err = c.Close()
+func Close() {
+	if c, ok := DefaultLogger.(logger.Closer); ok {
+		c.Close()
 	}
-	return err
 }
 
 // Err logs an error value using the DefaultLogger.
 func Err(lvl int, msg string, err error, e ...EntriesGiver) {
 	LogError(DefaultLogger, lvl, msg, err, e...)
-}
-
-// Format preformats the input if the DefaultLogger is a Formatter.
-// Otherwise returns the input unchanged.
-func Format(e EntriesGiver) EntriesGiver {
-	if f, ok := DefaultLogger.(Formatter); ok {
-		return f.Format(e)
-	}
-	return e
 }
 
 // Predefined level string forms (the constant identifier in all uppercase)
@@ -450,4 +380,13 @@ func MakeError(msg string, err error, e ...EntriesGiver) error {
 	}
 
 	return o
+}
+
+// Preformat uses the DefaultLogger if it is a Preformatter.
+// Otherwise returns the input unchanged.
+func Preformat(e EntriesGiver) EntriesGiver {
+	if p, ok := DefaultLogger.(Preformatter); ok {
+		return p.Preformat(e)
+	}
+	return e
 }
