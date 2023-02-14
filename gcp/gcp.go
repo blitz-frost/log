@@ -6,34 +6,23 @@ import (
 
 	"cloud.google.com/go/logging"
 	"github.com/blitz-frost/log"
+	"github.com/blitz-frost/log/logger"
 	"google.golang.org/api/option"
 )
 
-// Logger wraps a GCP logging.Logger. Values may be created either manually, or using NewLogger.
+// Logger wraps a GCP logging.Logger. Values must be created using LoggerMake or LoggerOf.
 //
 // Handles JSON marshaling and inserts encountered errors in the produced log (values starting in "LOG ERROR").
 //
-// Concurrent safe and should be able to handle fairly large volumes.
+// When closing, the underlying Logger will always be flushed before executing any custom Close function.
 type Logger struct {
-	// Since a logging.Client can have multiple Loggers, a particular setup may not want to automatically close the Client when closing the Logger.
-	// Therefore, the desired behaviour is defered to the user.
-	// Must be set before using the Logger.
-	// May be nil.
-	OnClose func() error
-
-	// this implementation mirrors log.LineLogger
-
-	dst *logging.Logger
-
-	dataChan  chan log.Data
-	writeChan chan chan logging.Entry
-
-	done chan struct{}
+	logger.T[logging.Entry]
 }
 
-// MakeLogger creates a new Logger value. It is a shorthand for logging.NewClient -> Client.Logger -> MakeLoggerOf.
-// Sets the resulting Logger's OnClose to the underlying client's Close method.
-func MakeLogger(setup LoggerSetup) (Logger, error) {
+// LoggerMake creates a Logger value. It is a shorthand for logging.NewClient -> Client.Logger -> MakeLoggerOf.
+//
+// If the provided OnClose method is nil, it will default to closing the created Client.
+func LoggerMake(setup LoggerSetup) (Logger, error) {
 	if setup.Ctx == nil {
 		setup.Ctx = context.Background()
 	}
@@ -45,132 +34,31 @@ func MakeLogger(setup LoggerSetup) (Logger, error) {
 
 	dst := cli.Logger(setup.LogID, setup.LoggerOptions...)
 
-	x := MakeLoggerOf(dst)
-	x.OnClose = cli.Close
-
-	return x, nil
-}
-
-// MakeLoggerOf wraps a logging.Logger. Useful for custom setups.
-func MakeLoggerOf(dst *logging.Logger) Logger {
-	x := Logger{
-		dst:       dst,
-		dataChan:  make(chan log.Data, 8),
-		writeChan: make(chan chan logging.Entry, 8),
-		done:      make(chan struct{}),
-	}
-
-	go x.run()
-	go x.write()
-
-	return x
-}
-
-// Close waits for all log calls to finish, flushes the underlying logging.Logger, then executes OnClose.
-func (x Logger) Close() error {
-	close(x.dataChan)
-	<-x.done
-
-	errors := make([]error, 0, 2) // potential double error situation
-
-	if err := x.dst.Flush(); err != nil {
-		errors = append(errors, err)
-	}
-
-	if x.OnClose != nil {
-		if err := x.OnClose(); err != nil {
-			errors = append(errors, err)
+	if setup.OnClose == nil {
+		setup.OnClose = func() {
+			if err := cli.Close(); err != nil {
+				panic(err)
+			}
 		}
 	}
 
-	if len(errors) == 0 {
-		return nil
-	}
-
-	if len(errors) == 1 {
-		return errors[0]
-	}
-
-	return log.MakeError("logger close", errors[1], log.Entry{"flush error", errors[0]})
+	return LoggerOf(dst, setup.OnClose), nil
 }
 
-func (x Logger) Format(e log.EntriesGiver) log.EntriesGiver {
-	return makeEntries(e)
+// LoggerOf wraps a logging.Logger. Useful for custom setups.
+// onClose may be nil, in which case it will simply NoOp (the source logging.Client is unknown).
+func LoggerOf(dst *logging.Logger, onClose func()) Logger {
+	return Logger{logger.Make[logging.Entry](core{
+		dst:     dst,
+		onClose: onClose,
+	})}
 }
 
-func (x Logger) Log(lvl int, msg string, e ...log.EntriesGiver) {
-	s := make([]log.Entries, len(e))
-	for i := range e {
-		s[i] = e[i].Entries()
-	}
-
-	x.dataChan <- log.Data{
-		Level:   lvl,
-		Message: msg,
-		Entries: s,
-	}
+func (x Logger) Preformat(e log.EntriesGiver) log.EntriesGiver {
+	return entriesMake(e)
 }
 
-func (x Logger) log(data log.Data, ch chan logging.Entry) {
-	// map level to gcp severity; seems to be 100 * lvl, but a switch is safer
-	var sev logging.Severity
-	switch data.Level {
-	case log.Default:
-		sev = logging.Default
-	case log.Debug:
-		sev = logging.Debug
-	case log.Info:
-		sev = logging.Info
-	case log.Notice:
-		sev = logging.Notice
-	case log.Warning:
-		sev = logging.Warning
-	case log.Error:
-		sev = logging.Error
-	case log.Critical:
-		sev = logging.Critical
-	case log.Alert:
-		sev = logging.Alert
-	case log.Emergency:
-		sev = logging.Emergency
-	}
-
-	buf := newBuffer()
-
-	buf.start()
-	buf.append(log.Entry{"msg", data.Message})
-	for _, e := range data.Entries {
-		buf.append(e)
-	}
-	buf.end()
-
-	ch <- logging.Entry{
-		Severity: sev,
-		Payload:  json.RawMessage(*buf),
-	}
-}
-
-func (x Logger) run() {
-	for data := range x.dataChan {
-		ch := make(chan logging.Entry)
-		go x.log(data, ch)
-		x.writeChan <- ch
-	}
-	close(x.writeChan)
-}
-
-func (x Logger) write() {
-	for ch := range x.writeChan {
-		x.dst.Log(<-ch)
-		/*
-			a := ((<-ch).Payload.(json.RawMessage))
-			log.Log(log.Debug, string(a))
-		*/
-	}
-	close(x.done)
-}
-
-// Used by NewLogger. Only Parent and LogID are mandatory.
+// Used by MakeLogger. Only Parent and LogID are mandatory.
 // See https://pkg.go.dev/cloud.google.com/go/logging (NewClient and Client.NewLogger) for more details.
 type LoggerSetup struct {
 	Ctx           context.Context
@@ -178,11 +66,12 @@ type LoggerSetup struct {
 	LogID         string
 	ClientOptions []option.ClientOption
 	LoggerOptions []logging.LoggerOption
+	OnClose       func()
 }
 
 type buffer []byte
 
-func newBuffer() *buffer {
+func bufferNew() *buffer {
 	x := make(buffer, 0, 1024)
 	return &x
 }
@@ -244,6 +133,64 @@ func (x *buffer) start() {
 	*x = append(*x, '{')
 }
 
+type core struct {
+	dst     *logging.Logger
+	onClose func()
+}
+
+func (x core) Close() {
+	if err := x.dst.Flush(); err != nil {
+		panic(err)
+	}
+
+	if x.onClose != nil {
+		x.onClose()
+	}
+}
+
+func (x core) Format(data logger.Data) logging.Entry {
+	// map level to gcp severity; seems to be 100 * lvl, but a switch is safer
+	var sev logging.Severity
+	switch data.Level {
+	case log.Default:
+		sev = logging.Default
+	case log.Debug:
+		sev = logging.Debug
+	case log.Info:
+		sev = logging.Info
+	case log.Notice:
+		sev = logging.Notice
+	case log.Warning:
+		sev = logging.Warning
+	case log.Error:
+		sev = logging.Error
+	case log.Critical:
+		sev = logging.Critical
+	case log.Alert:
+		sev = logging.Alert
+	case log.Emergency:
+		sev = logging.Emergency
+	}
+
+	buf := bufferNew()
+
+	buf.start()
+	buf.append(log.Entry{"msg", data.Message})
+	for _, e := range data.Entries {
+		buf.append(e)
+	}
+	buf.end()
+
+	return logging.Entry{
+		Severity: sev,
+		Payload:  json.RawMessage(*buf),
+	}
+}
+
+func (x core) Write(e logging.Entry) {
+	x.dst.Log(e)
+}
+
 // entries is the optimized preformatted entries for Logger.
 type entries struct {
 	src log.Entries
@@ -251,12 +198,12 @@ type entries struct {
 	buf buffer // holds comma separated json object members; ends in a comma
 }
 
-func makeEntries(src log.EntriesGiver) entries {
+func entriesMake(src log.EntriesGiver) entries {
 	if same, ok := src.(entries); ok {
 		return same
 	}
 
-	buf := newBuffer()
+	buf := bufferNew()
 	e := src.Entries()
 	for _, entry := range e {
 		buf.appendEntry(entry)

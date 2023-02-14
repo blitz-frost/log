@@ -1,10 +1,10 @@
 module github.com/blitz-frost/log/gcp
 
-go 1.19
+go 1.20
 
 require (
 	cloud.google.com/go/logging v1.6.1
-	github.com/blitz-frost/log v0.0.0
+	github.com/blitz-frost/log v0.0.1
 	google.golang.org/api v0.103.0
 )
 
