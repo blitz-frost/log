@@ -6,6 +6,8 @@ import (
 	"github.com/blitz-frost/rpc"
 )
 
+var ProcedureName = "Log"
+
 type Logger struct {
 	logger.T[logger.Data]
 }
@@ -14,14 +16,12 @@ type Logger struct {
 //
 // The underlying rpc system must be capable of handling interface types in general, as well as recognizing at least logger.Entries when used as interface values in particular.
 //
-// An empty name will default to "Log". onClose may be nil.
-func BindTo(cli rpc.Client, name string, onClose func()) (Logger, error) {
-	if name == "" {
-		name = "Log"
-	}
-
+// onClose may be nil.
+//
+// The used name can be controlled through the ProcedureName global variable.
+func BindTo(cli rpc.Client, onClose func()) (Logger, error) {
 	var f func(logger.Data) error
-	if err := cli.Bind(name, &f); err != nil {
+	if err := cli.Bind(ProcedureName, &f); err != nil {
 		return Logger{}, err
 	}
 
@@ -35,12 +35,8 @@ func BindTo(cli rpc.Client, name string, onClose func()) (Logger, error) {
 //
 // The underlying rpc system must be capable of handling interface types in general, as well as recognizing at least logger.Entries when used as interface values in particular.
 //
-// An empty name will default to "Log".
-func RegisterWith(lib rpc.Library, dst log.Logger, name string) error {
-	if name == "" {
-		name = "Log"
-	}
-
+// The used name can be controlled through the ProcedureName global variable.
+func RegisterWith(lib rpc.Library, dst log.Logger) error {
 	f := func(data logger.Data) error {
 		var e logger.Entries
 		for _, s := range data.Entries {
@@ -50,7 +46,7 @@ func RegisterWith(lib rpc.Library, dst log.Logger, name string) error {
 		dst.Log(data.Level, data.Message, e)
 		return nil
 	}
-	return lib.Register(name, f)
+	return lib.Register(ProcedureName, f)
 }
 
 type core struct {
