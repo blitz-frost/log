@@ -60,12 +60,41 @@ func (x core) Close() {
 	}
 }
 
+// Format replaces error Entry.Values with their error string, otherwise it might not really mean much to the receiver if concrete type information is lost.
+// Also ensures there are only Entries instead of EntriesGivers.
 func (x core) Format(data logger.Data) logger.Data {
+	for _, e := range data.Entries {
+		format(e)
+	}
 	return data
 }
 
 func (x core) Write(data logger.Data) {
 	if err := x.f(data); err != nil {
 		panic(err)
+	}
+}
+
+func format(e log.Entries) {
+	for i := range e {
+		v := e[i].Value
+		switch val := v.(type) {
+		case log.Entries:
+			// recursive format
+
+			format(val)
+		case log.EntriesGiver:
+			// replace interface with slice + recursive format
+
+			entries := val.Entries()
+			format(entries)
+			e[i].Value = entries
+
+		case error:
+			// replace interface with string
+			// note that log.errorBlock will satisfy the EntriesGiver branch
+
+			e[i].Value = val.Error()
+		}
 	}
 }
