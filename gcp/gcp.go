@@ -98,6 +98,10 @@ func (x *buffer) appendEntry(e log.Entry) {
 		x.start()
 		x.append(sub)
 		x.end()
+	case error:
+		// json marshal might produce nonsense
+		m, _ = json.Marshal(sub.Error())
+		*x = append(*x, m...)
 	default:
 		m, err := json.Marshal(sub)
 		if err != nil {
