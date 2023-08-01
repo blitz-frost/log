@@ -96,7 +96,7 @@ type Node struct {
 	src []EntriesGiver
 }
 
-// MakeNode creates a new usable Node using dst as the actual Logger implementation.
+// NodeMake creates a new usable Node using dst as the actual Logger implementation.
 //
 // static should return a set of immutable Entries, or at least guaranteed to not change throughout the lifespan of the Node.
 // If dst is a Formatter, static will be passed through it on creation.
@@ -105,7 +105,7 @@ type Node struct {
 // src is an optional list of EntriesGivers that will be drawn from for each log.
 //
 // New logs will contain: (possible preformated) static + src element Entries + particular log data.
-func MakeNode(dst Logger, static EntriesGiver, src ...EntriesGiver) Node {
+func NodeMake(dst Logger, static EntriesGiver, src ...EntriesGiver) Node {
 	var givers []EntriesGiver
 
 	if static != nil {
@@ -366,9 +366,9 @@ func LogError(x Logger, lvl int, msg string, err error, e ...EntriesGiver) {
 	x.Log(lvl, msg, e...)
 }
 
-// MakeError creates a new error value that implements Entries and may contain additional logging information.
+// ErrorMake creates a new error value that implements Entries and may contain additional logging information.
 // If err is non-nil, the new error will wrap it.
-func MakeError(msg string, err error, e ...EntriesGiver) error {
+func ErrorMake(msg string, err error, e ...EntriesGiver) error {
 	o := errorBlock{Entry{"msg", msg}}
 
 	for _, elem := range e {
