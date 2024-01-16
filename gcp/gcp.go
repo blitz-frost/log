@@ -29,7 +29,7 @@ func LoggerMake(setup LoggerSetup) (Logger, error) {
 
 	cli, err := logging.NewClient(setup.Ctx, setup.Parent, setup.ClientOptions...)
 	if err != nil {
-		return Logger{}, log.MakeError("new GCP client", err)
+		return Logger{}, log.ErrorMake("new GCP client", err)
 	}
 
 	dst := cli.Logger(setup.LogID, setup.LoggerOptions...)
