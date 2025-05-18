@@ -5,80 +5,57 @@ import (
 	"encoding/json"
 
 	"cloud.google.com/go/logging"
+	"github.com/blitz-frost/errors"
 	"github.com/blitz-frost/log"
-	"github.com/blitz-frost/log/logger"
 	"google.golang.org/api/option"
 )
 
-// Logger wraps a GCP logging.Logger. Values must be created using LoggerMake or LoggerOf.
+// Client is a shorthand for logging.NewClient -> Client.Logger -> Recorder.
+func Client(config Config) (log.Recorder, *logging.Client, error) {
+	if config.Ctx == nil {
+		config.Ctx = context.Background()
+	}
+
+	cli, err := logging.NewClient(config.Ctx, config.Parent, config.ClientOptions...)
+	if err != nil {
+		return nil, nil, errors.Message("new GCP client", err)
+	}
+
+	dst := cli.Logger(config.LogID, config.LoggerOptions...)
+	return Recorder(dst), cli, nil
+}
+
+// Recorder wraps a logging.Logger. Useful for custom setups.
 //
 // Handles JSON marshaling and inserts encountered errors in the produced log (values starting in "LOG ERROR").
-//
-// When closing, the underlying Logger will always be flushed before executing any custom Close function.
-type Logger struct {
-	logger.T[logging.Entry]
-}
-
-// LoggerMake creates a Logger value. It is a shorthand for logging.NewClient -> Client.Logger -> MakeLoggerOf.
-//
-// If the provided OnClose method is nil, it will default to closing the created Client.
-func LoggerMake(setup LoggerSetup) (Logger, error) {
-	if setup.Ctx == nil {
-		setup.Ctx = context.Background()
+func Recorder(dst *logging.Logger) log.Recorder {
+	return func(data log.Data) error {
+		e := format(data)
+		dst.Log(e)
+		return nil
 	}
-
-	cli, err := logging.NewClient(setup.Ctx, setup.Parent, setup.ClientOptions...)
-	if err != nil {
-		return Logger{}, log.ErrorMake("new GCP client", err)
-	}
-
-	dst := cli.Logger(setup.LogID, setup.LoggerOptions...)
-
-	if setup.OnClose == nil {
-		setup.OnClose = func() {
-			if err := cli.Close(); err != nil {
-				panic(err)
-			}
-		}
-	}
-
-	return LoggerOf(dst, setup.OnClose), nil
-}
-
-// LoggerOf wraps a logging.Logger. Useful for custom setups.
-// onClose may be nil, in which case it will simply NoOp (the source logging.Client is unknown).
-func LoggerOf(dst *logging.Logger, onClose func()) Logger {
-	return Logger{logger.Make[logging.Entry](core{
-		dst:     dst,
-		onClose: onClose,
-	})}
-}
-
-func (x Logger) Preformat(e log.EntriesGiver) log.EntriesGiver {
-	return entriesMake(e)
 }
 
 // Used by MakeLogger. Only Parent and LogID are mandatory.
 // See https://pkg.go.dev/cloud.google.com/go/logging (NewClient and Client.NewLogger) for more details.
-type LoggerSetup struct {
+type Config struct {
 	Ctx           context.Context
 	Parent        string
 	LogID         string
 	ClientOptions []option.ClientOption
 	LoggerOptions []logging.LoggerOption
-	OnClose       func()
 }
 
 type buffer []byte
 
-func bufferNew() *buffer {
+func bufferMake() *buffer {
 	x := make(buffer, 0, 1024)
 	return &x
 }
 
 func (x *buffer) append(e log.EntriesGiver) {
 	// check for preformatted entries
-	if fmt, ok := e.(entries); ok {
+	if fmt, ok := e.(Entries); ok {
 		*x = append(*x, fmt.buf...)
 		return
 	}
@@ -137,22 +114,7 @@ func (x *buffer) start() {
 	*x = append(*x, '{')
 }
 
-type core struct {
-	dst     *logging.Logger
-	onClose func()
-}
-
-func (x core) Close() {
-	if err := x.dst.Flush(); err != nil {
-		panic(err)
-	}
-
-	if x.onClose != nil {
-		x.onClose()
-	}
-}
-
-func (x core) Format(data logger.Data) logging.Entry {
+func format(data log.Data) logging.Entry {
 	// map level to gcp severity; seems to be 100 * lvl, but a switch is safer
 	var sev logging.Severity
 	switch data.Level {
@@ -176,7 +138,7 @@ func (x core) Format(data logger.Data) logging.Entry {
 		sev = logging.Emergency
 	}
 
-	buf := bufferNew()
+	buf := bufferMake()
 
 	buf.start()
 	buf.append(log.Entry{"msg", data.Message})
@@ -191,34 +153,30 @@ func (x core) Format(data logger.Data) logging.Entry {
 	}
 }
 
-func (x core) Write(e logging.Entry) {
-	x.dst.Log(e)
-}
-
-// entries is the optimized preformatted entries for Logger.
-type entries struct {
+// Entries is the optimized preformatted log.Entries for this package.
+type Entries struct {
 	src log.Entries
 
 	buf buffer // holds comma separated json object members; ends in a comma
 }
 
-func entriesMake(src log.EntriesGiver) entries {
-	if same, ok := src.(entries); ok {
+func EntriesMake(src log.EntriesGiver) Entries {
+	if same, ok := src.(Entries); ok {
 		return same
 	}
 
-	buf := bufferNew()
+	buf := bufferMake()
 	e := src.Entries()
 	for _, entry := range e {
 		buf.appendEntry(entry)
 	}
 
-	return entries{
+	return Entries{
 		src: e,
 		buf: *buf,
 	}
 }
 
-func (x entries) Entries() log.Entries {
+func (x Entries) Entries() log.Entries {
 	return x.src
 }
