@@ -1,21 +1,9 @@
 // Package log provides a foundation for convenient, structured logging, centered around key-value blocks.
-//
-// TODO update comments
-// The preferred usage pattern, for ultimate logging comfortableness, is to explicitly import this package using the "." notation, and replacing the DefaultLogger if needed.
-// In case of identifier conflicts or special setups, you will likely want to at least alias the Log and Err methods of a Logger, as well as the Entry and Entries types.
-//
-// If you have static values that are reused throughout your code, consider preformatting them.
-//
-// Use the Node type to create log pipelines that can be invoked through a single call.
-//
-// Need your types to self log dynamic data? Have them implement EntriesGiver.
-//
-//	x := someType{}
-//	...
-//	Log(recorder, Emergency, "there's a handsome person in front of the screen", x)
 package log
 
 import (
+	"strconv"
+
 	"github.com/blitz-frost/errors"
 )
 
@@ -64,10 +52,10 @@ type Data struct {
 	Entries []Entries
 }
 
-func DataOf(lvl int, msg string, e ...EntriesGiver) Data {
+func DataOf(lvl int, msg string, e ...Reporter) Data {
 	s := make([]Entries, len(e))
 	for i := range e {
-		s[i] = e[i].Entries()
+		s[i] = e[i].Report()
 	}
 
 	return Data{
@@ -79,17 +67,14 @@ func DataOf(lvl int, msg string, e ...EntriesGiver) Data {
 
 type Entries []Entry
 
-func (x Entries) Entries() Entries {
+func (x Entries) Report() Entries {
 	return x
 }
 
-// An EntriesGiver hands over Key-Value pairs in significant order for logging.
-// In order to avoid race conditions with asynchronous logging processes, implementations should ensure that returned Entry.Values are immutable or at least stable.
-type EntriesGiver interface {
-	Entries() Entries
-}
-
-func Err(err error) EntriesGiver {
+func Err(err error) Reporter {
+	if v, ok := err.(Reporter); ok {
+		return v
+	}
 	return errorEntries{err}
 }
 
@@ -98,12 +83,60 @@ type Entry struct {
 	Value any
 }
 
-func (x Entry) Entries() Entries {
+func (x Entry) Report() Entries {
 	return Entries{x}
 }
 
 // Recorder exists simply to make signatures and documentation a bit more intuitive to read.
 type Recorder func(Data) error
+
+// A Reporter hands over Key-Value pairs in significant order for logging.
+// In order to avoid race conditions with asynchronous logging processes, implementations should ensure that returned Entry.Values are immutable or at least stable.
+type Reporter interface {
+	Report() Entries
+}
+
+type ReporterGroup []Reporter
+
+func (x ReporterGroup) Report() Entries {
+	var o Entries
+	for _, v := range x {
+		o = append(o, v.Report()...)
+	}
+	return o
+}
+
+// S is a utility type to gather various data for logging, some of which might not have a clear key-value structure.
+type S []any
+
+// Entries converts contained values as follows:
+//
+//   - EntriesGiver -> used directly
+//   - error -> passed to the [Err] function
+//   - nil -> skipped
+//
+// Any other values as converted to an Entry with that value as the Value field. The key will be an incremental number starting at 0.
+func (x S) Report() Entries {
+	var (
+		i int
+		o Entries
+	)
+	for _, v := range x {
+		switch vv := v.(type) {
+		case nil:
+		case Reporter:
+			o = append(o, vv.Report()...)
+		case error:
+			o = append(o, Err(vv).Report()...)
+		default:
+			o = append(o, Entry{
+				Key:   strconv.Itoa(i),
+				Value: vv,
+			})
+		}
+	}
+	return o
+}
 
 // Fallback wraps a recorder that can fail.
 //
@@ -137,7 +170,10 @@ func FallbackHandleOnce(errLvl int, errMsg string, fallback Recorder) func(error
 
 		data := DataOf(errLvl, errMsg, Err(err))
 		if err2 := fallback(data); err2 != nil {
-			e := errors.Message("log fallback", err)
+			e := &errors.T{
+				Message: "log fallback",
+				Sub:     err,
+			}
 			e.Link(err2)
 			panic(e)
 		}
@@ -178,7 +214,7 @@ func LevelString(lvl int) string {
 // NOTE This is a function that takes a Recorder as first parameter, instead of being a Recorder method, because it would be annoying to always cast regular static functions to a specific type.
 // Also, this highlights the intended usage as a global entrypoint.
 // Of course, in practice nothing is preventing anyone from completely ignoring this function and using custom variants, or just using Recorders directly.
-func Print(recorder Recorder, lvl int, msg string, e ...EntriesGiver) {
+func Print(recorder Recorder, lvl int, msg string, e ...Reporter) {
 	data := DataOf(lvl, msg, e...)
 	if err := recorder(data); err != nil {
 		panic(err)
@@ -186,10 +222,10 @@ func Print(recorder Recorder, lvl int, msg string, e ...EntriesGiver) {
 }
 
 // Node creates a Recorder that facilitates logging flow by appending Entries collected from predefined EntriesGivers.
-func Node(dst Recorder, e ...EntriesGiver) Recorder {
+func Node(dst Recorder, e ...Reporter) Recorder {
 	return func(data Data) error {
 		for _, giver := range e {
-			data.Entries = append(data.Entries, giver.Entries())
+			data.Entries = append(data.Entries, giver.Report())
 		}
 
 		return dst(data)

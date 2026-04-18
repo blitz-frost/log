@@ -45,10 +45,10 @@ func format(e log.Entries) {
 			// recursive format
 
 			format(val)
-		case log.EntriesGiver:
+		case log.Reporter:
 			// replace interface with slice + recursive format
 
-			entries := val.Entries()
+			entries := val.Report()
 			format(entries)
 			e[i].Value = entries
 

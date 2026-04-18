@@ -18,7 +18,10 @@ func Client(config Config) (log.Recorder, *logging.Client, error) {
 
 	cli, err := logging.NewClient(config.Ctx, config.Parent, config.ClientOptions...)
 	if err != nil {
-		return nil, nil, errors.Message("new GCP client", err)
+		return nil, nil, &errors.T{
+			Message: "new GCP client",
+			Sub:     err,
+		}
 	}
 
 	dst := cli.Logger(config.LogID, config.LoggerOptions...)
@@ -53,14 +56,14 @@ func bufferMake() *buffer {
 	return &x
 }
 
-func (x *buffer) append(e log.EntriesGiver) {
+func (x *buffer) append(e log.Reporter) {
 	// check for preformatted entries
 	if fmt, ok := e.(Entries); ok {
 		*x = append(*x, fmt.buf...)
 		return
 	}
 
-	for _, entry := range e.Entries() {
+	for _, entry := range e.Report() {
 		x.appendEntry(entry)
 	}
 }
@@ -71,7 +74,7 @@ func (x *buffer) appendEntry(e log.Entry) {
 	*x = append(*x, ':')
 
 	switch sub := e.Value.(type) {
-	case log.EntriesGiver:
+	case log.Reporter:
 		x.start()
 		x.append(sub)
 		x.end()
@@ -160,13 +163,13 @@ type Entries struct {
 	buf buffer // holds comma separated json object members; ends in a comma
 }
 
-func EntriesMake(src log.EntriesGiver) Entries {
+func EntriesMake(src log.Reporter) Entries {
 	if same, ok := src.(Entries); ok {
 		return same
 	}
 
 	buf := bufferMake()
-	e := src.Entries()
+	e := src.Report()
 	for _, entry := range e {
 		buf.appendEntry(entry)
 	}
@@ -177,6 +180,6 @@ func EntriesMake(src log.EntriesGiver) Entries {
 	}
 }
 
-func (x Entries) Entries() log.Entries {
+func (x Entries) Report() log.Entries {
 	return x.src
 }

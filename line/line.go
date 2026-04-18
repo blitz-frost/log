@@ -54,7 +54,7 @@ func lineBufferMake() *lineBuffer {
 	}
 }
 
-func (x *lineBuffer) append(e log.EntriesGiver) {
+func (x *lineBuffer) append(e log.Reporter) {
 	if pre, ok := e.(Entries); ok {
 		// copy preformatted string, inserting appropriate spacing
 		start := 0
@@ -67,7 +67,7 @@ func (x *lineBuffer) append(e log.EntriesGiver) {
 		return
 	}
 
-	for _, entry := range e.Entries() {
+	for _, entry := range e.Report() {
 		x.appendEntry(entry)
 	}
 }
@@ -77,7 +77,7 @@ func (x *lineBuffer) appendEntry(e log.Entry) {
 	x.data = append(x.data, e.Key...)
 
 	switch sub := e.Value.(type) {
-	case log.EntriesGiver:
+	case log.Reporter:
 		x.endLine()
 		x.space = append(x.space, "  "...)
 		x.append(sub)
@@ -110,13 +110,13 @@ type Entries struct {
 	buf lineBuffer
 }
 
-func EntriesMake(src log.EntriesGiver) Entries {
+func EntriesMake(src log.Reporter) Entries {
 	if same, ok := src.(Entries); ok {
 		return same
 	}
 
 	buf := lineBuffer{}
-	entries := src.Entries()
+	entries := src.Report()
 	for _, entry := range entries {
 		buf.appendEntry(entry)
 	}
@@ -127,6 +127,6 @@ func EntriesMake(src log.EntriesGiver) Entries {
 	}
 }
 
-func (x Entries) Entries() log.Entries {
+func (x Entries) Report() log.Entries {
 	return x.src
 }

@@ -10,7 +10,7 @@ type errorEntries struct {
 	err error
 }
 
-func (x errorEntries) Entries() Entries {
+func (x errorEntries) Report() Entries {
 	p := errorPrinterMake()
 	errors.Traverse(p, x.err)
 
@@ -50,7 +50,7 @@ func (x *errorPrinter) Print(err *errors.T) {
 		e = append(e, Entry{"trace", err.Trace})
 	}
 
-	if len(err.Info) > 0 {
+	if err.Info != nil {
 		e = append(e, Entry{"info", err.Info})
 	}
 
