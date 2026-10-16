@@ -10,5 +10,5 @@ github.com/blitz-frost/log v0.1.0 h1:FCfnn/JHIQpICVX4QCYUylu1KK2SO0u2YHEHTj3lvVY
 github.com/blitz-frost/log v0.1.0/go.mod h1:o6n/1gXSwe2zdxAIDQ54MKSU7qCJiuPJUAdcLsq8dYE=
 github.com/blitz-frost/msg v0.2.0 h1:wandKzWWbwy7urkzSezmfOleGxFl3gRa10bMzZE4gek=
 github.com/blitz-frost/msg v0.2.0/go.mod h1:uQy8Tigo19XA/i/GeXC3+NtTFUzD08mdagIezoN44ec=
-github.com/blitz-frost/rpc v0.2.4 h1:LmTlBOd3QoqbP5BEm7YyqsoIfe1IeAhKOACJmrfEp9Q=
-github.com/blitz-frost/rpc v0.2.4/go.mod h1:QsWFlOCOQUjbKrGSmUHan3RTJQxIjQVZFwaKaYYZfX8=
+github.com/blitz-frost/rpc v0.2.4 h1:scYVj7o7kEFM4RHkjsk/wGoyNIw07mUF6TMmDdB3gGw=
+github.com/blitz-frost/rpc v0.2.4/go.mod h1:KUWDX23C6LITt6C/T6ZmAwjRSVNe6cf8j+bOkmkbPX8=

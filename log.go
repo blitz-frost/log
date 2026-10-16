@@ -170,12 +170,19 @@ func FallbackHandleOnce(errLvl int, errMsg string, fallback Recorder) func(error
 
 		data := DataOf(errLvl, errMsg, Err(err))
 		if err2 := fallback(data); err2 != nil {
-			e := &errors.T{
+			panic(&errors.T{
 				Message: "log fallback",
-				Sub:     err,
-			}
-			e.Link(err2)
-			panic(e)
+				Sub: errors.G{
+					{
+						Message: "triggering error",
+						Sub:     err,
+					},
+					{
+						Message: "fallback error",
+						Sub:     err2,
+					},
+				},
+			})
 		}
 
 		return fallback

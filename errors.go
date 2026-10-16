@@ -69,14 +69,6 @@ func (x *errorPrinter) SubEnd() {
 	x.end()
 }
 
-func (x *errorPrinter) Tail() {
-	x.sub(Entry{"tail", Entries{}})
-}
-
-func (x *errorPrinter) TailEnd() {
-	x.end()
-}
-
 func (x *errorPrinter) end() {
 	x.pending = x.pending[:len(x.pending)-1]
 }

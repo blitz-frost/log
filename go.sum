@@ -1,4 +1,2 @@
-github.com/blitz-frost/errors v0.0.0 h1:WhaNheCJQgxgyQZwzXcJdwN7ppYJPgzN37Kkn0sL44Y=
-github.com/blitz-frost/errors v0.0.0/go.mod h1:gcHFTPpSWeRfbEB+2GkRzMhwn/VfT1BYGBdqrig5uP0=
-github.com/blitz-frost/errors v0.1.0 h1:o8iVSWPABxaaRPvUHfLJSXVZi8dnaee6Q7jy9O/Gp9k=
-github.com/blitz-frost/errors v0.1.0/go.mod h1:gcHFTPpSWeRfbEB+2GkRzMhwn/VfT1BYGBdqrig5uP0=
+github.com/blitz-frost/errors v0.1.2 h1:gZniPNS0GEUlIkdir634Y+pmE+pOTIgYaq6GMpDuG4g=
+github.com/blitz-frost/errors v0.1.2/go.mod h1:OSlfms8Xn0OpSQVWeC+fEvuUHsDcQKoOQ98bL23JrRY=
